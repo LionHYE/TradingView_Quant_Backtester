@@ -89,6 +89,18 @@ class PortfolioHeatmapGenerator {
             var95: { displayName: 'VaR 95%', higherIsBetter: false, format: v => v.toFixed(2) },
             cvar95: { displayName: 'CVaR 95%', higherIsBetter: false, format: v => v.toFixed(2) },
             totalReturn: { displayName: 'Total Return', higherIsBetter: true, format: v => v.toFixed(2) },
+            annualReturn: { 
+                displayName: 'Annual Return (%)', 
+                higherIsBetter: true, 
+                format: v => v.toFixed(2),
+                colorThresholds: [
+                    { threshold: 50, color: '#1a9850', description: '極佳 (>= 50%)' },
+                    { threshold: 20, color: '#66bd63', description: '良好' },
+                    { threshold: 10, color: '#a6d96a', description: '尚可' },
+                    { threshold: 0,  color: '#fee08b', description: '持平' },
+                    { threshold: -10, color: '#d73027', description: '不佳 (< 0%)' }
+                ]
+            },
         };
     }
 
@@ -243,7 +255,23 @@ class PortfolioHeatmapGenerator {
         }
         const returns = periodTrades.map(trade => parseFloat(String(trade[this.detectedPnlColumn]).replace(/,/g, '')) || 0);
         const numTrades = returns.length; const totalReturn = returns.reduce((sum, r) => sum + r, 0); const avgReturn = totalReturn / numTrades; const winningTrades = returns.filter(r => r > 0).length; const winRate = (winningTrades / numTrades) * 100; const stdDev = Math.sqrt(returns.reduce((sum, r) => sum + Math.pow(r - avgReturn, 2), 0) / numTrades); const sharpeRatio = stdDev === 0 ? 0 : avgReturn / stdDev; const negativeReturns = returns.filter(r => r < 0); const downsideDev = negativeReturns.length > 1 ? Math.sqrt(negativeReturns.reduce((sum, r) => sum + Math.pow(r, 2), 0) / negativeReturns.length) : 0; const sortinoRatio = downsideDev === 0 ? (avgReturn > 0 ? Infinity : 0) : avgReturn / downsideDev; let cumulativePnl = 0, peakPnl = 0, maxDrawdown = 0; returns.forEach(r => { cumulativePnl += r; peakPnl = Math.max(peakPnl, cumulativePnl); maxDrawdown = Math.max(maxDrawdown, peakPnl - cumulativePnl); }); const mdd = (maxDrawdown / (initialCapital + peakPnl)) * 100; const calmarRatio = maxDrawdown === 0 ? (totalReturn > 0 ? Infinity : 0) : totalReturn / maxDrawdown; const sortedReturns = [...returns].sort((a, b) => a - b); const varIndex = Math.floor(numTrades * 0.05); const var95 = sortedReturns[varIndex] || 0; const cvarReturns = sortedReturns.slice(0, varIndex + 1); const cvar95 = cvarReturns.length > 0 ? cvarReturns.reduce((sum, r) => sum + r, 0) / cvarReturns.length : 0; const gains = returns.filter(r => r > 0).reduce((sum, r) => sum + r, 0); const losses = Math.abs(returns.filter(r => r < 0).reduce((sum, r) => sum + r, 0)); const omegaRatio = losses === 0 ? (gains > 0 ? Infinity : 1) : gains / losses;
-        return { numTrades, totalReturn, sharpeRatio: isNaN(sharpeRatio) ? 0 : sharpeRatio, sortinoRatio: isFinite(sortinoRatio) ? sortinoRatio : 0, calmarRatio: isFinite(calmarRatio) ? calmarRatio : 0, mdd: isNaN(mdd) ? 0 : mdd, winRate: isNaN(winRate) ? 0 : winRate, omegaRatio: isFinite(omegaRatio) ? omegaRatio : 0, var95: isNaN(var95) ? 0 : var95, cvar95: isNaN(cvar95) ? 0 : cvar95 };
+        
+        // --- 新增：計算年化回報率 ---
+        const startDate = periodTrades[0].parsedDate;
+        const endDate = periodTrades[periodTrades.length - 1].parsedDate;
+        const durationInMs = endDate.getTime() - startDate.getTime();
+        const durationInYears = durationInMs / (1000 * 60 * 60 * 24 * 365.25);
+        let annualReturn = 0;
+        if (durationInYears > 0 && initialCapital > 0) {
+            const finalCapital = initialCapital + totalReturn;
+            if (finalCapital > 0) {
+                annualReturn = (Math.pow(finalCapital / initialCapital, 1 / durationInYears) - 1) * 100;
+            } else {
+                annualReturn = -100; // 資金耗盡，回報率為 -100%
+            }
+        }
+        
+        return { numTrades, totalReturn, annualReturn: isNaN(annualReturn) ? 0 : annualReturn, sharpeRatio: isNaN(sharpeRatio) ? 0 : sharpeRatio, sortinoRatio: isFinite(sortinoRatio) ? sortinoRatio : 0, calmarRatio: isFinite(calmarRatio) ? calmarRatio : 0, mdd: isNaN(mdd) ? 0 : mdd, winRate: isNaN(winRate) ? 0 : winRate, omegaRatio: isFinite(omegaRatio) ? omegaRatio : 0, var95: isNaN(var95) ? 0 : var95, cvar95: isNaN(cvar95) ? 0 : cvar95 };
     }
 
     generateRectangularHeatmapData() {
@@ -354,12 +382,13 @@ class PortfolioHeatmapGenerator {
         </div>
 
         <div style="margin-top: 30px; text-align: center; color: #999; font-size: 12px;">
-            <p>報告生成於 ${new Date().toLocaleString('zh-TW')} | 數據來源: ${Array.from(this.portfolioInfo.sourceFiles).join(', ')}</p>
+            <p>報告生成於 ${new Date().toLocaleString('zh-TW')} | 數據來源: ${Array.from(this.portfolioInfo.sourceFiles).join(', ')} | 回測分析工具創作者: LionAlgo</p>
         </div>
     </div>
 
     <script>
         const equityData = ${JSON.stringify(equityCurveData)};
+        const initialCapital = ${this.initialCapital};
         const ctx = document.getElementById('equityCurveChart').getContext('2d');
         const gradient = ctx.createLinearGradient(0, 0, 0, 400);
         gradient.addColorStop(0, 'rgba(75, 192, 192, 0.5)');
@@ -375,7 +404,22 @@ class PortfolioHeatmapGenerator {
                     y: { title: { display: true, text: '權益價值' }, ticks: { callback: function(value) { return '$' + value.toLocaleString(); } } }
                 },
                 plugins: {
-                    tooltip: { mode: 'index', intersect: false, callbacks: { label: function(context) { let label = context.dataset.label || ''; if (label) { label += ': '; } if (context.parsed.y !== null) { label += new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' }).format(context.parsed.y); } return label; } } },
+                    tooltip: {
+                        mode: 'index',
+                        intersect: false,
+                        callbacks: {
+                            label: function(context) {
+                                const equity = context.parsed.y;
+                                if (equity === null || typeof initialCapital === 'undefined') {
+                                    return '';
+                                }
+                                const profitUSD = equity - initialCapital;
+                                const profitPercent = initialCapital !== 0 ? (profitUSD / initialCapital) * 100 : 0;
+                                // 格式: "100.00 USD (2.00%)"
+                                return \`\${profitUSD.toFixed(2)} USD (\${profitPercent.toFixed(2)}%)\`;
+                            }
+                        }
+                    },
                     legend: { display: false }
                 }
             }
