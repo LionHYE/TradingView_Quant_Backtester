@@ -5,20 +5,109 @@ const createCsvWriter = require('csv-writer').createObjectCsvWriter;
 const XLSX = require('xlsx');
 const readline = require('readline');
 
+// *** NEW: Color interpolation helper functions ***
+
+/**
+ * Converts a HEX color string to an RGB object.
+ * @param {string} hex - The hex color string (e.g., "#d73027").
+ * @returns {{r: number, g: number, b: number}} An object with r, g, b values.
+ */
+function hexToRgb(hex) {
+    let result = /^#?([a-f\d]{2})([a-f\d]{2})([a-f\d]{2})$/i.exec(hex);
+    return result ? {
+        r: parseInt(result[1], 16),
+        g: parseInt(result[2], 16),
+        b: parseInt(result[3], 16)
+    } : null;
+}
+
+/**
+ * Interpolates between two colors.
+ * @param {{r,g,b}} color1 - The starting color object.
+ * @param {{r,g,b}} color2 - The ending color object.
+ * @param {number} factor - The interpolation factor (0 to 1). 0 means color1, 1 means color2.
+ * @returns {string} The resulting color as an "rgb(r,g,b)" string.
+ */
+function interpolateColor(color1, color2, factor) {
+    let result = {
+        r: Math.round(color1.r + factor * (color2.r - color1.r)),
+        g: Math.round(color1.g + factor * (color2.g - color1.g)),
+        b: Math.round(color1.b + factor * (color2.b - color1.b)),
+    };
+    return `rgb(${result.r}, ${result.g}, ${result.b})`;
+}
+
 class SharpeHeatmapGenerator {
     constructor() {
         this.trades = [];
         this.periods = [];
         this.inputFolder = 'trade log input';
         this.fileInfo = null;
+        this.detectedPnlColumn = null;
 
-        // 定義所有指標的屬性，方便管理
+        // *** MODIFIED: colorThresholds now act as "stops" for the color gradient ***
+        // 您可以自由新增或修改這些顏色停靠點來客製化漸層效果
         this.metricProperties = {
-            sharpeRatio: { displayName: 'Sharpe Ratio', higherIsBetter: true, format: v => v.toFixed(3) },
-            sortinoRatio: { displayName: 'Sortino Ratio', higherIsBetter: true, format: v => v.toFixed(3) },
-            calmarRatio: { displayName: 'Calmar Ratio', higherIsBetter: true, format: v => v.toFixed(3) },
-            mdd: { displayName: 'Max Drawdown (%)', higherIsBetter: false, format: v => v.toFixed(2) },
-            winRate: { displayName: 'Win Rate (%)', higherIsBetter: true, format: v => v.toFixed(1) },
+            sharpeRatio: { 
+                displayName: 'Sharpe Ratio', 
+                higherIsBetter: true, 
+                format: v => v.toFixed(3),
+                colorThresholds: [
+                    { threshold: 2.0, color: '#1a9850', description: '極佳 (>= 2.0)' },  // Deep Green
+                    { threshold: 1.0, color: '#66bd63', description: '良好' },          // Green
+                    { threshold: 0.5, color: '#a6d96a', description: '尚可' },          // Light Green
+                    { threshold: 0.0, color: '#fee08b', description: '勉強' },          // Yellow
+                    { threshold: -0.5, color: '#d73027', description: '不佳 (< 0.0)' }    // Red
+                ]
+            },
+            sortinoRatio: { 
+                displayName: 'Sortino Ratio', 
+                higherIsBetter: true, 
+                format: v => v.toFixed(3),
+                colorThresholds: [
+                    { threshold: 3.0, color: '#1a9850', description: '極佳 (>= 3.0)' },
+                    { threshold: 2.0, color: '#66bd63', description: '良好' },
+                    { threshold: 1.0, color: '#a6d96a', description: '尚可' },
+                    { threshold: 0.0, color: '#fee08b', description: '勉強' },
+                    { threshold: -1.0, color: '#d73027', description: '不佳 (< 0.0)' }
+                ]
+            },
+            calmarRatio: { 
+                displayName: 'Calmar Ratio', 
+                higherIsBetter: true, 
+                format: v => v.toFixed(3),
+                colorThresholds: [
+                    { threshold: 3.0, color: '#1a9850', description: '極佳 (>= 3.0)' },
+                    { threshold: 1.0, color: '#66bd63', description: '良好' },
+                    { threshold: 0.5, color: '#a6d96a', description: '尚可' },
+                    { threshold: 0.0, color: '#fee08b', description: '勉強' },
+                    { threshold: -1.0, color: '#d73027', description: '不佳 (< 0.0)' }
+                ]
+            },
+            mdd: { 
+                displayName: 'Max Drawdown (%)', 
+                higherIsBetter: false, 
+                format: v => v.toFixed(2),
+                colorThresholds: [
+                    { threshold: 5,  color: '#1a9850', description: '極佳 (< 5%)' },
+                    { threshold: 10, color: '#a6d96a', description: '良好' },
+                    { threshold: 20, color: '#fee08b', description: '尚可' },
+                    { threshold: 30, color: '#f46d43', description: '警告' },
+                    { threshold: 50, color: '#d73027', description: '危險 (> 30%)' }
+                ]
+            },
+            winRate: { 
+                displayName: 'Win Rate (%)', 
+                higherIsBetter: true, 
+                format: v => v.toFixed(1),
+                colorThresholds: [
+                    { threshold: 65, color: '#1a9850', description: '極佳 (>= 65%)' },
+                    { threshold: 55, color: '#66bd63', description: '良好' },
+                    { threshold: 50, color: '#a6d96a', description: '尚可' },
+                    { threshold: 45, color: '#fee08b', description: '勉強' },
+                    { threshold: 40, color: '#d73027', description: '不佳 (< 45%)' }
+                ]
+            },
             omegaRatio: { displayName: 'Omega Ratio', higherIsBetter: true, format: v => v.toFixed(3) },
             var95: { displayName: 'VaR 95%', higherIsBetter: false, format: v => v.toFixed(2) },
             cvar95: { displayName: 'CVaR 95%', higherIsBetter: false, format: v => v.toFixed(2) },
@@ -26,9 +115,7 @@ class SharpeHeatmapGenerator {
         };
     }
 
-    // 解析檔案名稱 (保持不變)
     parseFileName(fileName) {
-        // ... (您的原始代碼，保持不變)
         try {
             const nameWithoutExt = path.basename(fileName, path.extname(fileName));
             const parts = nameWithoutExt.split('___');
@@ -105,9 +192,7 @@ class SharpeHeatmapGenerator {
         }
     }
 
-    // 自動尋找檔案 (保持不變)
     findCSVFile() {
-        // ... (您的原始代碼，保持不變)
         const inputPath = path.resolve(this.inputFolder);
         
         if (!fs.existsSync(inputPath)) {
@@ -165,7 +250,6 @@ class SharpeHeatmapGenerator {
         };
     }
 
-    // 讀取CSV檔案 (保持不變)
     readCSV(filePath) {
         return new Promise((resolve, reject) => {
             const results = [];
@@ -189,9 +273,7 @@ class SharpeHeatmapGenerator {
         });
     }
 
-    // 讀取Excel檔案 (保持不變)
     async readExcel(filePath) {
-        // ... (您的原始代碼，保持不變)
         try {
             const workbook = XLSX.readFile(filePath);
             const firstSheetName = workbook.SheetNames[0];
@@ -206,7 +288,6 @@ class SharpeHeatmapGenerator {
         }
     }
 
-    // 自動讀取檔案 (保持不變)
     async autoReadFile() {
         this.fileInfo = this.findCSVFile();
         
@@ -217,9 +298,7 @@ class SharpeHeatmapGenerator {
         }
     }
 
-    // 日期時間解析函數 (保持不變)
     parseDateTime(dateStr) {
-        // ... (您的原始代碼，保持不變)
         if (!dateStr) return new Date('invalid');
 
         if (typeof dateStr === 'string' && dateStr.match(/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}/)) {
@@ -240,7 +319,6 @@ class SharpeHeatmapGenerator {
         return new Date('invalid');
     }
 
-    // 週期計算邏輯 (使用修正後的版本)
     calculatePeriods(periodType, periodLength) {
         if (!this.trades || !this.trades.length) {
             throw new Error('❌ 檔案中沒有可分析的交易紀錄');
@@ -301,8 +379,7 @@ class SharpeHeatmapGenerator {
         return periods;
     }
 
-    // *** MODIFIED: 計算單一週期的所有統計指標 ***
-    calculatePeriodStats(periodTrades, initialCapital = 10000) { // 假設初始資金用於計算MDD%
+    calculatePeriodStats(periodTrades, initialCapital = 10000) {
         if (!periodTrades || periodTrades.length === 0) {
             const nullStats = {};
             Object.keys(this.metricProperties).forEach(key => nullStats[key] = 0);
@@ -330,19 +407,16 @@ class SharpeHeatmapGenerator {
         const totalReturn = returns.reduce((sum, r) => sum + r, 0);
         const avgReturn = totalReturn / numTrades;
         
-        // --- 基本指標 ---
         const winningTrades = returns.filter(r => r > 0).length;
         const winRate = (winningTrades / numTrades) * 100;
 
         const stdDev = Math.sqrt(returns.reduce((sum, r) => sum + Math.pow(r - avgReturn, 2), 0) / numTrades);
         const sharpeRatio = stdDev === 0 ? 0 : avgReturn / stdDev;
         
-        // --- Sortino Ratio ---
         const negativeReturns = returns.filter(r => r < 0);
         const downsideDev = negativeReturns.length > 1 ? Math.sqrt(negativeReturns.reduce((sum, r) => sum + Math.pow(r, 2), 0) / negativeReturns.length) : 0;
         const sortinoRatio = downsideDev === 0 ? (avgReturn > 0 ? Infinity : 0) : avgReturn / downsideDev;
 
-        // --- MDD & Calmar Ratio ---
         let cumulativePnl = 0;
         let peakPnl = 0;
         let maxDrawdown = 0;
@@ -352,17 +426,15 @@ class SharpeHeatmapGenerator {
             const drawdown = peakPnl - cumulativePnl;
             maxDrawdown = Math.max(maxDrawdown, drawdown);
         });
-        const mdd = (maxDrawdown / (initialCapital + peakPnl)) * 100; // MDD as percentage
+        const mdd = (maxDrawdown / (initialCapital + peakPnl)) * 100;
         const calmarRatio = maxDrawdown === 0 ? (totalReturn > 0 ? Infinity : 0) : totalReturn / maxDrawdown;
 
-        // --- VaR & CVaR (95%) ---
         const sortedReturns = [...returns].sort((a, b) => a - b);
         const varIndex = Math.floor(numTrades * 0.05);
         const var95 = sortedReturns[varIndex] || 0;
         const cvarReturns = sortedReturns.slice(0, varIndex + 1);
         const cvar95 = cvarReturns.length > 0 ? cvarReturns.reduce((sum, r) => sum + r, 0) / cvarReturns.length : 0;
         
-        // --- Omega Ratio (threshold = 0) ---
         const gains = returns.filter(r => r > 0).reduce((sum, r) => sum + r, 0);
         const losses = Math.abs(returns.filter(r => r < 0).reduce((sum, r) => sum + r, 0));
         const omegaRatio = losses === 0 ? (gains > 0 ? Infinity : 1) : gains / losses;
@@ -381,7 +453,6 @@ class SharpeHeatmapGenerator {
         };
     }
 
-    // *** MODIFIED: 生成矩形熱力圖數據 ***
     generateRectangularHeatmapData() {
         if (!this.periods.length) throw new Error('❌ 請先計算時間週期');
 
@@ -416,29 +487,76 @@ class SharpeHeatmapGenerator {
         return { heatmapData, rectangularMatrix, dimensions: { rows, cols, totalPeriods } };
     }
 
-    // *** MODIFIED: 生成HTML熱力圖視覺化 ***
+    // *** MODIFIED: 生成HTML熱力圖視覺化 (支援平滑漸層顏色) ***
     generateHeatmapHTML(heatmapData, rectangularMatrix, dimensions, chosenMetric) {
-        const { rows, cols } = dimensions;
+        const { cols } = dimensions;
         const strategyInfo = this.fileInfo.parsedInfo;
         const metricInfo = this.metricProperties[chosenMetric];
         
-        const validValues = heatmapData
-            .map(d => d[chosenMetric])
-            .filter(v => v !== null && !isNaN(v) && isFinite(v));
-        
-        const minValue = Math.min(...validValues);
-        const maxValue = Math.max(...validValues);
-        
+        const generateLegendHTML = (metricInfo) => {
+            if (!metricInfo.colorThresholds || metricInfo.colorThresholds.length === 0) {
+                return '<p>使用相對顏色標度 (紅: 差 -> 綠: 優)。</p>';
+            }
+            let legendItems = '';
+            const thresholds = metricInfo.higherIsBetter 
+                ? [...metricInfo.colorThresholds].sort((a,b) => b.threshold - a.threshold)
+                : [...metricInfo.colorThresholds].sort((a,b) => a.threshold - b.threshold);
+                
+            for (const item of thresholds) {
+                legendItems += `<div class="legend-item"><span class="legend-color" style="background-color: ${item.color};"></span>${item.description}</div>`;
+            }
+            return `<div class="legend">${legendItems}</div>`;
+        };
+
         const getColor = (value) => {
             if (value === null || isNaN(value) || !isFinite(value)) return '#f0f0f0';
             
+            // *** NEW: 平滑漸層顏色邏輯 ***
+            if (metricInfo.colorThresholds && metricInfo.colorThresholds.length > 1) {
+                const thresholds = metricInfo.higherIsBetter 
+                    ? [...metricInfo.colorThresholds].sort((a, b) => b.threshold - a.threshold)
+                    : [...metricInfo.colorThresholds].sort((a, b) => a.threshold - b.threshold);
+                
+                if (metricInfo.higherIsBetter) {
+                    if (value >= thresholds[0].threshold) return thresholds[0].color;
+                    if (value <= thresholds[thresholds.length - 1].threshold) return thresholds[thresholds.length - 1].color;
+                } else {
+                    if (value <= thresholds[0].threshold) return thresholds[0].color;
+                    if (value >= thresholds[thresholds.length - 1].threshold) return thresholds[thresholds.length - 1].color;
+                }
+
+                for (let i = 0; i < thresholds.length - 1; i++) {
+                    const upperStop = thresholds[i];
+                    const lowerStop = thresholds[i + 1];
+
+                    const inRange = metricInfo.higherIsBetter
+                        ? (value < upperStop.threshold && value >= lowerStop.threshold)
+                        : (value > upperStop.threshold && value <= lowerStop.threshold);
+
+                    if (inRange) {
+                        const range = upperStop.threshold - lowerStop.threshold;
+                        if (range === 0) return upperStop.color;
+
+                        const factor = (value - lowerStop.threshold) / range;
+                        const color1_rgb = hexToRgb(lowerStop.color);
+                        const color2_rgb = hexToRgb(upperStop.color);
+
+                        if (!color1_rgb || !color2_rgb) return '#f0f0f0';
+
+                        return interpolateColor(color1_rgb, color2_rgb, factor);
+                    }
+                }
+                
+                return thresholds[thresholds.length - 1].color; // Fallback
+            }
+
+            // *** FALLBACK: 原本的相對顏色邏輯 ***
+            const validValues = heatmapData.map(d => d[chosenMetric]).filter(v => v !== null && !isNaN(v) && isFinite(v));
+            const minValue = Math.min(...validValues);
+            const maxValue = Math.max(...validValues);
             let normalized = (value - minValue) / (maxValue - minValue);
             if (maxValue === minValue) normalized = 0.5;
-
-            if (!metricInfo.higherIsBetter) {
-                normalized = 1 - normalized; // 反轉顏色
-            }
-            
+            if (!metricInfo.higherIsBetter) normalized = 1 - normalized;
             const r = Math.round(255 * Math.min(1, 2 * (1 - normalized)));
             const g = Math.round(255 * Math.min(1, 2 * normalized));
             return `rgb(${r}, ${g}, 50)`;
@@ -462,13 +580,18 @@ class SharpeHeatmapGenerator {
         .info-value { font-size: 18px; color: #2c3e50; margin-top: 6px; font-weight: 500; }
         .heatmap-container { overflow-x: auto; padding-bottom: 10px; }
         .heatmap { display: grid; grid-template-columns: repeat(${cols}, 1fr); gap: 3px; min-width: ${cols * 45}px; }
-        .cell { aspect-ratio: 1; min-width: 40px; display: flex; align-items: center; justify-content: center; font-size: 12px; font-weight: 600; color: white; border-radius: 4px; cursor: pointer; transition: transform 0.2s, box-shadow 0.2s; position: relative; }
+        .cell { aspect-ratio: 1; min-width: 40px; display: flex; align-items: center; justify-content: center; font-size: 12px; font-weight: 600; color: white; border-radius: 4px; cursor: pointer; transition: transform 0.2s, box-shadow 0.2s; position: relative; text-shadow: 1px 1px 2px rgba(0,0,0,0.4); }
         .cell:hover { transform: scale(1.15); z-index: 10; box-shadow: 0 6px 12px rgba(0,0,0,0.3); }
         .cell.empty { background-color: #e9ecef; }
         .tooltip { visibility: hidden; position: absolute; background: rgba(0,0,0,0.85); color: white; padding: 10px; border-radius: 6px; font-size: 12px; pointer-events: none; z-index: 1000; white-space: nowrap; transform: translate(-50%, -110%); top: 0; left: 50%; opacity: 0; transition: opacity 0.2s, visibility 0.2s; }
         .tooltip-grid { display: grid; grid-template-columns: auto auto; gap: 4px 12px; }
         .tooltip-label { font-weight: 600; color: #a0a0a0; }
         .cell:hover .tooltip { visibility: visible; opacity: 1; }
+        .legend-section { margin-top: 30px; padding: 15px; background-color: #f8f9fa; border-radius: 8px; }
+        .legend-section h3 { margin-top: 0; text-align: center; font-size: 16px; color: #333; }
+        .legend { display: flex; flex-wrap: wrap; justify-content: center; gap: 20px; }
+        .legend-item { display: flex; align-items: center; font-size: 13px; }
+        .legend-color { width: 15px; height: 15px; border-radius: 3px; margin-right: 8px; border: 1px solid rgba(0,0,0,0.1); }
         .stats-section { margin-top: 40px; }
         .stats-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 20px; }
         .stat-card { background: #f8f9fa; padding: 20px; border-radius: 8px; text-align: center; border: 1px solid #e8eaf1; }
@@ -514,6 +637,10 @@ class SharpeHeatmapGenerator {
                 }).join('')}
             </div>
         </div>
+        <div class="legend-section">
+            <h3>顏色圖例 (${metricInfo.displayName})</h3>
+            ${generateLegendHTML(metricInfo)}
+        </div>
         <div class="stats-section">
             <div class="stats-grid">
                 ${Object.entries(this.metricProperties).map(([key, prop]) => {
@@ -542,7 +669,6 @@ class SharpeHeatmapGenerator {
         return html;
     }
 
-    // *** MODIFIED: 生成所有輸出檔案 ***
     async generateAllOutputs(periodType = 'day', periodLength = 1, chosenMetric = 'sharpeRatio') {
         try {
             console.log('\n🚀 開始生成多維度策略分析報告...\n');
@@ -563,11 +689,9 @@ class SharpeHeatmapGenerator {
             const timestamp = new Date().toISOString().replace(/[:.]/g, '-').split('T')[0];
             const strategyName = this.fileInfo.parsedInfo.strategyName.replace(/[^a-zA-Z0-9\u4e00-\u9fa5]/g, '_');
             
-            // HTML 輸出
             const htmlPath = path.join(outputDir, `${strategyName}_${chosenMetric}_heatmap_${timestamp}.html`);
             fs.writeFileSync(htmlPath, htmlContent, 'utf8');
             
-            // 數據輸出 (CSV)
             const csvPath = path.join(outputDir, `${strategyName}_full_stats_${timestamp}.csv`);
             const csvHeader = [
                 { id: 'period', title: 'Period' }, { id: 'startDate', title: 'Start Date' }, { id: 'endDate', title: 'End Date' },
@@ -590,7 +714,6 @@ class SharpeHeatmapGenerator {
         }
     }
 
-    // *** MODIFIED: 互動式設定 ***
     async interactiveSetup() {
         const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
         const question = (query) => new Promise(resolve => rl.question(query, resolve));
