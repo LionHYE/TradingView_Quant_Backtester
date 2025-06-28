@@ -5,21 +5,12 @@ const createCsvWriter = require('csv-writer').createObjectCsvWriter;
 const XLSX = require('xlsx');
 const readline = require('readline');
 
-// --- Color interpolation helper functions (保持不變) ---
-function hexToRgb(hex) {
-    let result = /^#?([a-f\d]{2})([a-f\d]{2})([a-f\d]{2})$/i.exec(hex);
-    return result ? { r: parseInt(result[1], 16), g: parseInt(result[2], 16), b: parseInt(result[3], 16) } : null;
-}
-function interpolateColor(color1, color2, factor) {
-    let result = { r: Math.round(color1.r + factor * (color2.r - color1.r)), g: Math.round(color1.g + factor * (color2.g - color1.g)), b: Math.round(color1.b + factor * (color2.b - color1.b)) };
-    return `rgb(${result.r}, ${result.g}, ${result.b})`;
-}
-
 class PortfolioHeatmapGenerator {
     constructor() {
         this.trades = [];
         this.periods = [];
         this.inputFolder = 'trade log input';
+        this.initialCapital = 10000; // 初始資金，用於計算 MDD 和權益曲線
         this.portfolioInfo = {
             name: "組合策略",
             strategyNames: new Set(),
@@ -31,40 +22,107 @@ class PortfolioHeatmapGenerator {
         };
         this.detectedPnlColumn = null;
         this.detectedDateColumn = null;
+
+        // 定義所有指標的屬性，包括顏色漸層的「停靠點」
         this.metricProperties = {
-            sharpeRatio: { displayName: 'Sharpe Ratio', higherIsBetter: true, format: v => v.toFixed(3), colorThresholds: [ { threshold: 2.0, color: '#1a9850', description: '極佳 (>= 2.0)' }, { threshold: 1.0, color: '#66bd63', description: '良好' }, { threshold: 0.5, color: '#a6d96a', description: '尚可' }, { threshold: 0.0, color: '#fee08b', description: '勉強' }, { threshold: -0.5, color: '#d73027', description: '不佳 (< 0.0)' } ] },
-            sortinoRatio: { displayName: 'Sortino Ratio', higherIsBetter: true, format: v => v.toFixed(3), colorThresholds: [ { threshold: 3.0, color: '#1a9850', description: '極佳 (>= 3.0)' }, { threshold: 2.0, color: '#66bd63', description: '良好' }, { threshold: 1.0, color: '#a6d96a', description: '尚可' }, { threshold: 0.0, color: '#fee08b', description: '勉強' }, { threshold: -1.0, color: '#d73027', description: '不佳 (< 0.0)' } ] },
-            calmarRatio: { displayName: 'Calmar Ratio', higherIsBetter: true, format: v => v.toFixed(3), colorThresholds: [ { threshold: 3.0, color: '#1a9850', description: '極佳 (>= 3.0)' }, { threshold: 1.0, color: '#66bd63', description: '良好' }, { threshold: 0.5, color: '#a6d96a', description: '尚可' }, { threshold: 0.0, color: '#fee08b', description: '勉強' }, { threshold: -1.0, color: '#d73027', description: '不佳 (< 0.0)' } ] },
-            mdd: { displayName: 'Max Drawdown (%)', higherIsBetter: false, format: v => v.toFixed(2), colorThresholds: [ { threshold: 5,  color: '#1a9850', description: '極佳 (< 5%)' }, { threshold: 10, color: '#a6d96a', description: '良好' }, { threshold: 20, color: '#fee08b', description: '尚可' }, { threshold: 30, color: '#f46d43', description: '警告' }, { threshold: 50, color: '#d73027', description: '危險 (> 30%)' } ] },
-            winRate: { displayName: 'Win Rate (%)', higherIsBetter: true, format: v => v.toFixed(1), colorThresholds: [ { threshold: 65, color: '#1a9850', description: '極佳 (>= 65%)' }, { threshold: 55, color: '#66bd63', description: '良好' }, { threshold: 50, color: '#a6d96a', description: '尚可' }, { threshold: 45, color: '#fee08b', description: '勉強' }, { threshold: 40, color: '#d73027', description: '不佳 (< 45%)' } ] },
+            sharpeRatio: { 
+                displayName: 'Sharpe Ratio', 
+                higherIsBetter: true, 
+                format: v => v.toFixed(3),
+                colorThresholds: [
+                    { threshold: 2.0, color: '#1a9850', description: '極佳 (>= 2.0)' },
+                    { threshold: 1.0, color: '#66bd63', description: '良好' },
+                    { threshold: 0.5, color: '#a6d96a', description: '尚可' },
+                    { threshold: 0.0, color: '#fee08b', description: '勉強' },
+                    { threshold: -0.5, color: '#d73027', description: '不佳 (< 0.0)' }
+                ]
+            },
+            sortinoRatio: { 
+                displayName: 'Sortino Ratio', 
+                higherIsBetter: true, 
+                format: v => v.toFixed(3),
+                colorThresholds: [
+                    { threshold: 3.0, color: '#1a9850', description: '極佳 (>= 3.0)' },
+                    { threshold: 2.0, color: '#66bd63', description: '良好' },
+                    { threshold: 1.0, color: '#a6d96a', description: '尚可' },
+                    { threshold: 0.0, color: '#fee08b', description: '勉強' },
+                    { threshold: -1.0, color: '#d73027', description: '不佳 (< 0.0)' }
+                ]
+            },
+            calmarRatio: { 
+                displayName: 'Calmar Ratio', 
+                higherIsBetter: true, 
+                format: v => v.toFixed(3),
+                colorThresholds: [
+                    { threshold: 3.0, color: '#1a9850', description: '極佳 (>= 3.0)' },
+                    { threshold: 1.0, color: '#66bd63', description: '良好' },
+                    { threshold: 0.5, color: '#a6d96a', description: '尚可' },
+                    { threshold: 0.0, color: '#fee08b', description: '勉強' },
+                    { threshold: -1.0, color: '#d73027', description: '不佳 (< 0.0)' }
+                ]
+            },
+            mdd: { 
+                displayName: 'Max Drawdown (%)', 
+                higherIsBetter: false, 
+                format: v => v.toFixed(2),
+                colorThresholds: [
+                    { threshold: 5,  color: '#1a9850', description: '極佳 (< 5%)' },
+                    { threshold: 10, color: '#a6d96a', description: '良好' },
+                    { threshold: 20, color: '#fee08b', description: '尚可' },
+                    { threshold: 30, color: '#f46d43', description: '警告' },
+                    { threshold: 50, color: '#d73027', description: '危險 (> 30%)' }
+                ]
+            },
+            winRate: { 
+                displayName: 'Win Rate (%)', 
+                higherIsBetter: true, 
+                format: v => v.toFixed(1),
+                colorThresholds: [
+                    { threshold: 65, color: '#1a9850', description: '極佳 (>= 65%)' },
+                    { threshold: 55, color: '#66bd63', description: '良好' },
+                    { threshold: 50, color: '#a6d96a', description: '尚可' },
+                    { threshold: 45, color: '#fee08b', description: '勉強' },
+                    { threshold: 40, color: '#d73027', description: '不佳 (< 45%)' }
+                ]
+            },
             omegaRatio: { displayName: 'Omega Ratio', higherIsBetter: true, format: v => v.toFixed(3) },
             var95: { displayName: 'VaR 95%', higherIsBetter: false, format: v => v.toFixed(2) },
             cvar95: { displayName: 'CVaR 95%', higherIsBetter: false, format: v => v.toFixed(2) },
             totalReturn: { displayName: 'Total Return', higherIsBetter: true, format: v => v.toFixed(2) },
         };
     }
-    
+
+    hexToRgb(hex) {
+        let result = /^#?([a-f\d]{2})([a-f\d]{2})([a-f\d]{2})$/i.exec(hex);
+        return result ? { r: parseInt(result[1], 16), g: parseInt(result[2], 16), b: parseInt(result[3], 16) } : null;
+    }
+
+    interpolateColor(color1, color2, factor) {
+        let result = {
+            r: Math.round(color1.r + factor * (color2.r - color1.r)),
+            g: Math.round(color1.g + factor * (color2.g - color1.g)),
+            b: Math.round(color1.b + factor * (color2.b - color1.b)),
+        };
+        return `rgb(${result.r}, ${result.g}, ${result.b})`;
+    }
+
     parseFileName(fileName) {
         try {
             const nameWithoutExt = path.basename(fileName, path.extname(fileName));
             const parts = nameWithoutExt.split('___');
-            
             if (parts.length >= 2) {
                 const strategyPart = parts[0];
                 const detailsPart = parts[1];
                 let strategyName = strategyPart.replace(/_/g, ' ');
-                
                 const platformParts = detailsPart.split('_');
                 let platform = '', symbol = '', broker = '';
                 const exchanges = ['BYBIT', 'BINANCE', 'OKX', 'BITGET', 'GATE', 'HUOBI', 'KUCOIN'];
                 const exchangeIndex = platformParts.findIndex(part => exchanges.some(ex => part.toUpperCase().includes(ex)));
-                
                 if (exchangeIndex >= 0) {
                     broker = platformParts.slice(0, exchangeIndex).join(' ');
                     platform = platformParts[exchangeIndex];
                     symbol = platformParts.slice(exchangeIndex + 1).join('_').replace(/_\d{4}-\d{2}-\d{2}$/, '');
                 }
-                
                 return { originalName: fileName, strategyName, broker, platform, symbol, parsed: true };
             }
             return { originalName: fileName, strategyName: nameWithoutExt.replace(/_/g, ' '), broker: 'N/A', platform: 'N/A', symbol: 'N/A', parsed: false };
@@ -114,7 +172,6 @@ class PortfolioHeatmapGenerator {
     async autoReadAllFilesAndCombine() {
         const filesToProcess = this.findAllFiles();
         let allTrades = [];
-
         for (const file of filesToProcess) {
             try {
                 console.log(`\n🔄 正在讀取檔案: ${file.fileName}...`);
@@ -124,17 +181,14 @@ class PortfolioHeatmapGenerator {
                 } else {
                     tradesFromFile = await this.readCSV(file.fullPath);
                 }
-
                 if (tradesFromFile.length > 0) {
                     const parsedInfo = this.parseFileName(file.fileName);
                     allTrades.push(...tradesFromFile);
-
                     this.portfolioInfo.strategyNames.add(parsedInfo.strategyName);
                     if(parsedInfo.broker) this.portfolioInfo.brokers.add(parsedInfo.broker);
                     if(parsedInfo.platform) this.portfolioInfo.platforms.add(parsedInfo.platform);
                     if(parsedInfo.symbol) this.portfolioInfo.symbols.add(parsedInfo.symbol);
                     this.portfolioInfo.sourceFiles.add(file.fileName);
-
                     console.log(`   ✅ 成功讀取並合併 ${tradesFromFile.length} 筆交易.`);
                 } else {
                     console.log(`   ⚠️ 檔案 ${file.fileName} 為空，已跳過。`);
@@ -143,22 +197,17 @@ class PortfolioHeatmapGenerator {
                 console.error(`❌ 讀取檔案 ${file.fileName} 失敗: ${error.message}`);
             }
         }
-
         if (allTrades.length === 0) throw new Error("❌ 所有檔案都讀取失敗或為空。");
-
         const firstTrade = allTrades[0];
         const dateColumns = Object.keys(firstTrade).filter(key => ['date', 'time', 'timestamp', '日期', '時間', 'created', 'open', 'close'].some(k => key.toLowerCase().includes(k)));
         if (dateColumns.length === 0) throw new Error('❌ 在交易數據中找不到日期欄位。');
         this.detectedDateColumn = dateColumns[0];
         console.log(`\n📅 使用日期欄位進行排序: ${this.detectedDateColumn}`);
-
         this.trades = allTrades.map(trade => ({...trade, parsedDate: this.parseDateTime(trade[this.detectedDateColumn])})).filter(trade => !isNaN(trade.parsedDate.getTime()));
         this.trades.sort((a, b) => a.parsedDate - b.parsedDate);
-        
         const startDate = this.trades[0].parsedDate.toISOString().split('T')[0];
         const endDate = this.trades[this.trades.length - 1].parsedDate.toISOString().split('T')[0];
         this.portfolioInfo.tradingDateRange = `${startDate} ~ ${endDate}`;
-        
         console.log(`\n📈 所有檔案合併完成！總共 ${this.trades.length} 筆交易紀錄。`);
     }
 
@@ -167,9 +216,9 @@ class PortfolioHeatmapGenerator {
         const startDate = this.trades[0].parsedDate, endDate = this.trades[this.trades.length - 1].parsedDate;
         let intervalMs;
         switch (periodType.toLowerCase()) {
-            case 'day': case 'days': case '日': intervalMs = periodLength * 24 * 60 * 60 * 1000; break;
-            case 'week': case 'weeks': case '週': case '周': intervalMs = periodLength * 7 * 24 * 60 * 60 * 1000; break;
-            case 'month': case 'months': case '月': intervalMs = periodLength * 30 * 24 * 60 * 60 * 1000; break;
+            case 'day': intervalMs = periodLength * 24 * 60 * 60 * 1000; break;
+            case 'week': intervalMs = periodLength * 7 * 24 * 60 * 60 * 1000; break;
+            case 'month': intervalMs = periodLength * 30 * 24 * 60 * 60 * 1000; break;
             default: throw new Error('❌ 不支援的週期類型');
         }
         const periods = []; let currentStart = new Date(startDate), periodIndex = 1;
@@ -184,7 +233,7 @@ class PortfolioHeatmapGenerator {
         return periods;
     }
 
-    calculatePeriodStats(periodTrades, initialCapital = 10000) {
+    calculatePeriodStats(periodTrades, initialCapital) {
         if (!periodTrades || periodTrades.length === 0) { const nullStats = {}; Object.keys(this.metricProperties).forEach(key => nullStats[key] = 0); nullStats.numTrades = 0; return nullStats; }
         if (!this.detectedPnlColumn) {
              const pnlColumns = Object.keys(periodTrades[0]).filter(key => ['p&l', 'pnl', 'profit', 'return', '損益', '獲利', '盈虧', 'pl', 'net', 'realized'].some(k => key.toLowerCase().includes(k)));
@@ -199,14 +248,26 @@ class PortfolioHeatmapGenerator {
 
     generateRectangularHeatmapData() {
         if (!this.periods.length) throw new Error('❌ 請先計算時間週期');
-        const heatmapData = this.periods.map(period => ({ period: period.index, startDate: period.startDate.toISOString().split('T')[0], endDate: period.endDate.toISOString().split('T')[0], ...this.calculatePeriodStats(period.trades) }));
+        const heatmapData = this.periods.map(period => ({ period: period.index, startDate: period.startDate.toISOString().split('T')[0], endDate: period.endDate.toISOString().split('T')[0], ...this.calculatePeriodStats(period.trades, this.initialCapital) }));
         const cols = 20; const totalPeriods = heatmapData.length; const rows = Math.ceil(totalPeriods / cols); console.log(`📊 熱力圖矩陣大小: ${rows} 行 × ${cols} 列`);
         const rectangularMatrix = [];
         for (let row = 0; row < rows; row++) { for (let col = 0; col < cols; col++) { const index = row * cols + col; const cellData = index < heatmapData.length ? heatmapData[index] : { period: null }; const emptyCell = {}; if (cellData.period === null) Object.keys(this.metricProperties).forEach(key => emptyCell[key] = null); rectangularMatrix.push({ position: index + 1, row: row + 1, col: col + 1, ...cellData, ...emptyCell }); } }
         return { heatmapData, rectangularMatrix, dimensions: { rows, cols, totalPeriods } };
     }
-    
-    generateHeatmapHTML(heatmapData, rectangularMatrix, dimensions, chosenMetric) {
+
+    generateEquityCurveData() {
+        if (!this.trades || this.trades.length === 0) return [];
+        let equity = this.initialCapital;
+        const equityData = [{ x: this.trades[0].parsedDate.getTime() - 1, y: this.initialCapital }]; // Start point
+        for (const trade of this.trades) {
+            const pnl = parseFloat(String(trade[this.detectedPnlColumn]).replace(/,/g, '')) || 0;
+            equity += pnl;
+            equityData.push({ x: trade.parsedDate.getTime(), y: parseFloat(equity.toFixed(2)) });
+        }
+        return equityData;
+    }
+
+    generateHeatmapHTML(heatmapData, rectangularMatrix, dimensions, chosenMetric, overallStats, equityCurveData) {
         const { cols } = dimensions;
         const metricInfo = this.metricProperties[chosenMetric];
         
@@ -215,21 +276,25 @@ class PortfolioHeatmapGenerator {
         const platforms = Array.from(this.portfolioInfo.platforms).join(', ') || 'N/A';
         const symbols = Array.from(this.portfolioInfo.symbols).join(', ') || 'N/A';
         
-        const getColor = (value) => { if (value === null || isNaN(value) || !isFinite(value)) return '#f0f0f0'; if (metricInfo.colorThresholds && metricInfo.colorThresholds.length > 1) { const thresholds = metricInfo.higherIsBetter ? [...metricInfo.colorThresholds].sort((a, b) => b.threshold - a.threshold) : [...metricInfo.colorThresholds].sort((a, b) => a.threshold - b.threshold); if (metricInfo.higherIsBetter) { if (value >= thresholds[0].threshold) return thresholds[0].color; if (value <= thresholds[thresholds.length - 1].threshold) return thresholds[thresholds.length - 1].color; } else { if (value <= thresholds[0].threshold) return thresholds[0].color; if (value >= thresholds[thresholds.length - 1].threshold) return thresholds[thresholds.length - 1].color; } for (let i = 0; i < thresholds.length - 1; i++) { const upperStop = thresholds[i], lowerStop = thresholds[i + 1]; const inRange = metricInfo.higherIsBetter ? (value < upperStop.threshold && value >= lowerStop.threshold) : (value > upperStop.threshold && value <= lowerStop.threshold); if (inRange) { const range = upperStop.threshold - lowerStop.threshold; if (range === 0) return upperStop.color; const factor = (value - lowerStop.threshold) / range; const color1_rgb = hexToRgb(lowerStop.color), color2_rgb = hexToRgb(upperStop.color); if (!color1_rgb || !color2_rgb) return '#f0f0f0'; return interpolateColor(color1_rgb, color2_rgb, factor); } } return thresholds[thresholds.length - 1].color; } const validValues = heatmapData.map(d => d[chosenMetric]).filter(v => v !== null && !isNaN(v) && isFinite(v)); const minValue = Math.min(...validValues), maxValue = Math.max(...validValues); let normalized = (value - minValue) / (maxValue - minValue); if (maxValue === minValue) normalized = 0.5; if (!metricInfo.higherIsBetter) normalized = 1 - normalized; const r = Math.round(255 * Math.min(1, 2 * (1 - normalized))), g = Math.round(255 * Math.min(1, 2 * normalized)); return `rgb(${r}, ${g}, 50)`; };
-        const generateLegendHTML = (metricInfo) => { if (!metricInfo.colorThresholds || metricInfo.colorThresholds.length === 0) return '<p>使用相對顏色標度 (紅: 差 -> 綠: 優)。</p>'; let legendItems = ''; const thresholds = metricInfo.higherIsBetter ? [...metricInfo.colorThresholds].sort((a,b) => b.threshold - a.threshold) : [...metricInfo.colorThresholds].sort((a,b) => a.threshold - b.threshold); for (const item of thresholds) legendItems += `<div class="legend-item"><span class="legend-color" style="background-color: ${item.color};"></span>${item.description}</div>`; return `<div class="legend">${legendItems}</div>`; };
+        const getColor = (value) => { if (value === null || isNaN(value) || !isFinite(value)) return '#f0f0f0'; if (metricInfo.colorThresholds && metricInfo.colorThresholds.length > 1) { const thresholds = metricInfo.higherIsBetter ? [...metricInfo.colorThresholds].sort((a, b) => b.threshold - a.threshold) : [...metricInfo.colorThresholds].sort((a, b) => a.threshold - b.threshold); if (metricInfo.higherIsBetter) { if (value >= thresholds[0].threshold) return thresholds[0].color; if (value <= thresholds[thresholds.length - 1].threshold) return thresholds[thresholds.length - 1].color; } else { if (value <= thresholds[0].threshold) return thresholds[0].color; if (value >= thresholds[thresholds.length - 1].threshold) return thresholds[thresholds.length - 1].color; } for (let i = 0; i < thresholds.length - 1; i++) { const upperStop = thresholds[i], lowerStop = thresholds[i + 1]; const inRange = metricInfo.higherIsBetter ? (value < upperStop.threshold && value >= lowerStop.threshold) : (value > upperStop.threshold && value <= lowerStop.threshold); if (inRange) { const range = upperStop.threshold - lowerStop.threshold; if (range === 0) return upperStop.color; const factor = (value - lowerStop.threshold) / range; const color1_rgb = this.hexToRgb(lowerStop.color), color2_rgb = this.hexToRgb(upperStop.color); if (!color1_rgb || !color2_rgb) return '#f0f0f0'; return this.interpolateColor(color1_rgb, color2_rgb, factor); } } return thresholds[thresholds.length - 1].color; } const validValues = heatmapData.map(d => d[chosenMetric]).filter(v => v !== null && !isNaN(v) && isFinite(v)); const minValue = Math.min(...validValues), maxValue = Math.max(...validValues); let normalized = (value - minValue) / (maxValue - minValue); if (maxValue === minValue) normalized = 0.5; if (!metricInfo.higherIsBetter) normalized = 1 - normalized; const r = Math.round(255 * Math.min(1, 2 * (1 - normalized))), g = Math.round(255 * Math.min(1, 2 * normalized)); return `rgb(${r}, ${g}, 50)`; };
+        const generateLegendHTML = (metricInfo) => { if (!metricInfo.colorThresholds || metricInfo.colorThresholds.length === 0) return ''; let legendItems = ''; const thresholds = metricInfo.higherIsBetter ? [...metricInfo.colorThresholds].sort((a,b) => b.threshold - a.threshold) : [...metricInfo.colorThresholds].sort((a,b) => a.threshold - b.threshold); for (const item of thresholds) legendItems += `<div class="legend-item"><span class="legend-color" style="background-color: ${item.color};"></span>${item.description}</div>`; return `<div class="legend-section"><h3>顏色圖例 (${metricInfo.displayName})</h3><div class="legend">${legendItems}</div></div>`; };
 
         const html = `
 <!DOCTYPE html>
 <html lang="zh-TW">
 <head>
     <meta charset="UTF-8">
-    <title>${metricInfo.displayName} 熱力圖 - ${portfolioName}</title>
+    <title>${portfolioName} 組合策略分析報告</title>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns/dist/chartjs-adapter-date-fns.bundle.min.js"></script>
     <style>
         body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif; margin: 20px; background-color: #f4f6f9; color: #333; }
         .container { max-width: 1600px; margin: auto; background: white; padding: 30px; border-radius: 12px; box-shadow: 0 4px 20px rgba(0,0,0,0.08); }
-        .header { text-align: center; /* <<< 這行確保標題和副標題置中 */ margin-bottom: 25px; }
-        .header h1 { font-size: 28px; color: #1a253c; margin-bottom: 5px; }
-        .header h2 { font-size: 20px; color: #5a6ac2; font-weight: 500; }
+        .header { text-align: center; margin-bottom: 25px; }
+        h1, h2 { color: #1a253c; }
+        h1 { font-size: 28px; margin-bottom: 5px; }
+        h2 { font-size: 22px; margin-top: 40px; padding-bottom: 10px; border-bottom: 2px solid #e8eaf1; }
+        .header h2 { font-size: 20px; color: #5a6ac2; font-weight: 500; border-bottom: none; margin-top: 0; }
         .strategy-info { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 20px; margin-bottom: 30px; padding: 25px; background: #fafbff; border-radius: 10px; border: 1px solid #e8eaf1; }
         .info-item { text-align: center; }
         .info-label { font-weight: 600; color: #777; font-size: 13px; text-transform: uppercase; letter-spacing: 0.5px; }
@@ -248,18 +313,18 @@ class PortfolioHeatmapGenerator {
         .legend { display: flex; flex-wrap: wrap; justify-content: center; gap: 20px; }
         .legend-item { display: flex; align-items: center; font-size: 13px; }
         .legend-color { width: 15px; height: 15px; border-radius: 3px; margin-right: 8px; border: 1px solid rgba(0,0,0,0.1); }
-        .stats-section { margin-top: 40px; }
+        .stats-section { margin-top: 20px; }
         .stats-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 20px; }
         .stat-card { background: #f8f9fa; padding: 20px; border-radius: 8px; text-align: center; border: 1px solid #e8eaf1; }
         .stat-value { font-size: 26px; font-weight: 700; color: #2c3e50; }
         .stat-label { font-size: 13px; color: #667; margin-top: 8px; }
+        .chart-container { margin-top: 20px; padding: 20px; background-color: #f8f9fa; border-radius: 8px; height: 400px; }
     </style>
 </head>
 <body>
     <div class="container">
         <div class="header">
-            <h1>${metricInfo.displayName} 熱力圖分析</h1>
-            <h2>${portfolioName}</h2>
+            <h1>${portfolioName} 組合策略分析報告</h1>
         </div>
         
         <div class="strategy-info">
@@ -269,23 +334,53 @@ class PortfolioHeatmapGenerator {
             <div class="info-item"><div class="info-label">交易日期</div><div class="info-value">${this.portfolioInfo.tradingDateRange}</div></div>
         </div>
         
+        <h2>週期性表現熱力圖 (${metricInfo.displayName})</h2>
         <div class="heatmap-container">
              <div class="heatmap">${rectangularMatrix.map(cell => { if (cell.period === null) return `<div class="cell empty"></div>`; const cellValue = cell[chosenMetric]; const displayValue = (cellValue !== null && isFinite(cellValue)) ? metricInfo.format(cellValue) : 'N/A'; return `<div class="cell" style="background-color: ${getColor(cellValue)};">${displayValue}<div class="tooltip"><div class="tooltip-grid"><div class="tooltip-label">週期:</div> <div>${cell.period}</div><div class="tooltip-label">日期:</div> <div>${cell.startDate}</div><hr style="grid-column: 1 / -1; border-color: #555; margin: 2px 0;">${Object.entries(this.metricProperties).map(([key, prop]) => `<div class="tooltip-label">${prop.displayName}:</div><div>${(cell[key] !== null && isFinite(cell[key])) ? prop.format(cell[key]) : 'N/A'}</div>`).join('')}<div class="tooltip-label">交易數:</div> <div>${cell.numTrades}</div></div></div></div>`; }).join('')}</div>
         </div>
+        ${generateLegendHTML(metricInfo)}
         
-        <div class="legend-section">
-            <h3>顏色圖例 (${metricInfo.displayName})</h3>
-            ${generateLegendHTML(metricInfo)}
-        </div>
-
+        <h2>總體績效指標 (Overall Performance)</h2>
         <div class="stats-section">
-             <div class="stats-grid">${Object.entries(this.metricProperties).map(([key, prop]) => { const values = heatmapData.map(d => d[key]).filter(v => v !== null && isFinite(v)); if (values.length === 0) return ''; const avgValue = values.reduce((s, v) => s + v, 0) / values.length; return `<div class="stat-card"><div class="stat-value">${prop.format(avgValue)}</div><div class="stat-label">平均 ${prop.displayName}</div></div>`; }).join('')}<div class="stat-card"><div class="stat-value">${heatmapData.reduce((s, d) => s + d.numTrades, 0)}</div><div class="stat-label">總交易數</div></div></div>
+            <div class="stats-grid">
+                ${Object.entries(this.metricProperties).map(([key, prop]) => { const value = overallStats[key]; return `<div class="stat-card"><div class="stat-value">${(value !== null && isFinite(value)) ? prop.format(value) : 'N/A'}</div><div class="stat-label">${prop.displayName}</div></div>`; }).join('')}
+                <div class="stat-card"><div class="stat-value">${overallStats.numTrades}</div><div class="stat-label">總交易數</div></div>
+            </div>
+        </div>
+        
+        <h2>權益曲線 (Equity Curve)</h2>
+        <div class="chart-container">
+            <canvas id="equityCurveChart"></canvas>
         </div>
 
         <div style="margin-top: 30px; text-align: center; color: #999; font-size: 12px;">
-            <p>熱力圖生成於 ${new Date().toLocaleString('zh-TW')} | 數據來源: ${Array.from(this.portfolioInfo.sourceFiles).join(', ')}</p>
+            <p>報告生成於 ${new Date().toLocaleString('zh-TW')} | 數據來源: ${Array.from(this.portfolioInfo.sourceFiles).join(', ')}</p>
         </div>
     </div>
+
+    <script>
+        const equityData = ${JSON.stringify(equityCurveData)};
+        const ctx = document.getElementById('equityCurveChart').getContext('2d');
+        const gradient = ctx.createLinearGradient(0, 0, 0, 400);
+        gradient.addColorStop(0, 'rgba(75, 192, 192, 0.5)');
+        gradient.addColorStop(1, 'rgba(75, 192, 192, 0)');
+
+        new Chart(ctx, {
+            type: 'line',
+            data: { datasets: [{ label: '權益 (Equity)', data: equityData, borderColor: 'rgb(75, 192, 192)', backgroundColor: gradient, borderWidth: 2, pointRadius: 0, pointHoverRadius: 5, tension: 0.1, fill: true, }] },
+            options: {
+                responsive: true, maintainAspectRatio: false,
+                scales: {
+                    x: { type: 'time', time: { unit: 'day', tooltipFormat: 'yyyy-MM-dd HH:mm', displayFormats: { day: 'yyyy-MM-dd' } }, title: { display: true, text: '日期' }, grid: { display: false } },
+                    y: { title: { display: true, text: '權益價值' }, ticks: { callback: function(value) { return '$' + value.toLocaleString(); } } }
+                },
+                plugins: {
+                    tooltip: { mode: 'index', intersect: false, callbacks: { label: function(context) { let label = context.dataset.label || ''; if (label) { label += ': '; } if (context.parsed.y !== null) { label += new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' }).format(context.parsed.y); } return label; } } },
+                    legend: { display: false }
+                }
+            }
+        });
+    </script>
 </body>
 </html>`;
         return html;
@@ -295,12 +390,17 @@ class PortfolioHeatmapGenerator {
         try {
             console.log('\n🚀 開始生成組合策略分析報告...\n');
             await this.autoReadAllFilesAndCombine();
+            
+            const overallStats = this.calculatePeriodStats(this.trades, this.initialCapital);
+            const equityCurveData = this.generateEquityCurveData();
+            console.log('✅ 已計算總體績效並生成權益曲線數據。');
+
             this.calculatePeriods(periodType, periodLength);
             
             const { heatmapData, rectangularMatrix, dimensions } = this.generateRectangularHeatmapData();
-            if (heatmapData.length === 0) { console.warn('⚠️ 沒有足夠的數據來生成報告。'); return; }
+            if (heatmapData.length === 0) { console.warn('⚠️ 沒有足夠的週期性數據來生成熱力圖。'); }
             
-            const htmlContent = this.generateHeatmapHTML(heatmapData, rectangularMatrix, dimensions, chosenMetric);
+            const htmlContent = this.generateHeatmapHTML(heatmapData, rectangularMatrix, dimensions, chosenMetric, overallStats, equityCurveData);
             
             const outputDir = 'sharpe_heatmap_output';
             if (!fs.existsSync(outputDir)) fs.mkdirSync(outputDir);
@@ -308,33 +408,32 @@ class PortfolioHeatmapGenerator {
             const timestamp = new Date().toISOString().replace(/[:.]/g, '-').split('T')[0];
             const baseName = "Combined_Portfolio";
             
-            const htmlPath = path.join(outputDir, `${baseName}_${chosenMetric}_heatmap_${timestamp}.html`);
+            const htmlPath = path.join(outputDir, `${baseName}_Analysis_${timestamp}.html`);
             fs.writeFileSync(htmlPath, htmlContent, 'utf8');
             
-            const csvPath = path.join(outputDir, `${baseName}_full_stats_${timestamp}.csv`);
+            const csvPath = path.join(outputDir, `${baseName}_periodic_stats_${timestamp}.csv`);
             const csvHeader = [ { id: 'period', title: 'Period' }, { id: 'startDate', title: 'Start Date' }, { id: 'endDate', title: 'End Date' }, ...Object.entries(this.metricProperties).map(([key, prop]) => ({ id: key, title: prop.displayName })), { id: 'numTrades', title: 'Num Trades' } ];
             const csvWriter = createCsvWriter({ path: csvPath, header: csvHeader });
             await csvWriter.writeRecords(heatmapData);
 
             console.log('\n✅ 組合分析報告生成完成！');
             console.log(`📁 輸出目錄: ${outputDir}`);
-            console.log(`🎯 主顯示指標: ${this.metricProperties[chosenMetric].displayName}`);
             console.log('\n📋 輸出檔案:');
-            console.log(`   • HTML 熱力圖: ${path.basename(htmlPath)}`);
-            console.log(`   • CSV 詳細數據: ${path.basename(csvPath)}`);
+            console.log(`   • HTML 完整報告: ${path.basename(htmlPath)}`);
+            console.log(`   • CSV 週期性數據: ${path.basename(csvPath)}`);
         } catch (error) {
             console.error('❌ 生成過程發生錯誤:', error.message);
         }
     }
 
     async interactiveSetup() {
-         const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+        const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
         const question = (query) => new Promise(resolve => rl.question(query, resolve));
         try {
             console.log('🎯 組合策略表現熱力圖生成器');
             console.log('====================================\n');
             const periodType = await question('📅 請選擇週期類型 (day/week/month) [預設: day]: ') || 'day';
-            const periodLengthInput = await question('📊 請輸入週期長度 (數字) [預設: 1]: ') || '1';
+            const periodLengthInput = await question('📊 請輸入週期長度 (數字) [預社: 1]: ') || '1';
             const periodLength = parseInt(periodLengthInput) || 1;
             console.log('\n📈 請選擇熱力圖主顯示指標:');
             const metricKeys = Object.keys(this.metricProperties);
@@ -358,7 +457,7 @@ async function main() {
     const generator = new PortfolioHeatmapGenerator();
     try {
         await generator.interactiveSetup();
-    } catch (error) {
+    } catch(error) {
         console.error('\n❌ 程式執行失敗:', error.message);
     }
 }
