@@ -1,0 +1,28 @@
+{
+    "name": "sharpe-heatmap-generator",
+    "version": "1.0.0",
+    "description": "Generate Sharpe Ratio Heatmap from trading data CSV files",
+    "main": "sharpe-heatmap-generator.js",
+    "scripts": {
+        "start": "node sharpe-heatmap-generator.js",
+        "test": "echo \"Error: no test specified\" && exit 1"
+    },
+    "keywords": [
+        "trading",
+        "sharpe-ratio",
+        "heatmap",
+        "backtest",
+        "analysis"
+    ],
+    "author": "LionAlgo",
+    "license": "MIT",
+    "dependencies": {
+        "csv-parser": "^3.0.0",
+        "csv-writer": "^1.6.0",
+        "git": "^0.1.5",
+        "xlsx": "^0.18.5"
+    },
+    "engines": {
+        "node": ">=14.0.0"
+    }
+}
