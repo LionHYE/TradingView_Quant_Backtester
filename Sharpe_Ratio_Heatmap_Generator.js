@@ -86,9 +86,9 @@ class PortfolioHeatmapGenerator {
                 ]
             },
             omegaRatio: { displayName: 'Omega Ratio', higherIsBetter: true, format: v => v.toFixed(3) },
-            var95: { displayName: 'VaR 95%', higherIsBetter: false, format: v => v.toFixed(2) },
-            cvar95: { displayName: 'CVaR 95%', higherIsBetter: false, format: v => v.toFixed(2) },
-            totalReturn: { displayName: 'Total Return', higherIsBetter: true, format: v => v.toFixed(2) },
+            var95: { displayName: 'VaR 95% (USD)', higherIsBetter: false, format: v => v.toFixed(2) },
+            cvar95: { displayName: 'CVaR 95% (USD)', higherIsBetter: false, format: v => v.toFixed(2) },
+            totalReturn: { displayName: 'Total Return (USD)', higherIsBetter: true, format: v => v.toFixed(2) },
             annualReturn: { 
                 displayName: 'Annual Return (%)', 
                 higherIsBetter: true, 
@@ -128,7 +128,7 @@ class PortfolioHeatmapGenerator {
                 let strategyName = strategyPart.replace(/_/g, ' ');
                 const platformParts = detailsPart.split('_');
                 let platform = '', symbol = '', broker = '';
-                const exchanges = ['BYBIT', 'BINANCE', 'OKX', 'BITGET', 'GATE', 'HUOBI', 'KUCOIN'];
+                const exchanges = ['BYBIT', 'BINANCE', 'OKX', 'BITGET', 'GATE', 'HUOBI', 'KUCOIN', 'BINGX'];
                 const exchangeIndex = platformParts.findIndex(part => exchanges.some(ex => part.toUpperCase().includes(ex)));
                 if (exchangeIndex >= 0) {
                     broker = platformParts.slice(0, exchangeIndex).join(' ');
@@ -193,15 +193,28 @@ class PortfolioHeatmapGenerator {
                 } else {
                     tradesFromFile = await this.readCSV(file.fullPath);
                 }
+
                 if (tradesFromFile.length > 0) {
+                    console.log(`   - 成功讀取 ${tradesFromFile.length} 筆原始記錄。`);
                     const parsedInfo = this.parseFileName(file.fileName);
-                    allTrades.push(...tradesFromFile);
+                    
+                    // --- START: 核心修正 ---
+                    // 這裡加入過濾邏輯，只保留代表交易結束的「出場」或「Close」記錄
+                    // 這是為了解決原始數據中每筆交易有兩行（進場/出場）但P&L相同，導致重複計算的問題。
+                    const exitTradesOnly = tradesFromFile.filter(trade => {
+                        const tradeType = trade['種類']; // 根據您提供的數據，欄位名為「種類」
+                        return tradeType && (tradeType.includes('出場') || tradeType.includes('Close'));
+                    });
+
+                    console.log(`   - 過濾後，保留 ${exitTradesOnly.length} 筆出場/平倉交易。`);
+                    allTrades.push(...exitTradesOnly);
+                    // --- END: 核心修正 ---
+
                     this.portfolioInfo.strategyNames.add(parsedInfo.strategyName);
                     if(parsedInfo.broker) this.portfolioInfo.brokers.add(parsedInfo.broker);
                     if(parsedInfo.platform) this.portfolioInfo.platforms.add(parsedInfo.platform);
                     if(parsedInfo.symbol) this.portfolioInfo.symbols.add(parsedInfo.symbol);
                     this.portfolioInfo.sourceFiles.add(file.fileName);
-                    console.log(`   ✅ 成功讀取並合併 ${tradesFromFile.length} 筆交易.`);
                 } else {
                     console.log(`   ⚠️ 檔案 ${file.fileName} 為空，已跳過。`);
                 }
@@ -209,14 +222,18 @@ class PortfolioHeatmapGenerator {
                 console.error(`❌ 讀取檔案 ${file.fileName} 失敗: ${error.message}`);
             }
         }
-        if (allTrades.length === 0) throw new Error("❌ 所有檔案都讀取失敗或為空。");
+
+        if (allTrades.length === 0) throw new Error("❌ 所有檔案都讀取失敗或為空，或過濾後沒有留下任何交易記錄。");
+
         const firstTrade = allTrades[0];
         const dateColumns = Object.keys(firstTrade).filter(key => ['date', 'time', 'timestamp', '日期', '時間', 'created', 'open', 'close'].some(k => key.toLowerCase().includes(k)));
         if (dateColumns.length === 0) throw new Error('❌ 在交易數據中找不到日期欄位。');
         this.detectedDateColumn = dateColumns[0];
+        
         console.log(`\n📅 使用日期欄位進行排序: ${this.detectedDateColumn}`);
         this.trades = allTrades.map(trade => ({...trade, parsedDate: this.parseDateTime(trade[this.detectedDateColumn])})).filter(trade => !isNaN(trade.parsedDate.getTime()));
         this.trades.sort((a, b) => a.parsedDate - b.parsedDate);
+
         const startDate = this.trades[0].parsedDate.toISOString().split('T')[0];
         const endDate = this.trades[this.trades.length - 1].parsedDate.toISOString().split('T')[0];
         this.portfolioInfo.tradingDateRange = `${startDate} ~ ${endDate}`;
@@ -329,7 +346,7 @@ class PortfolioHeatmapGenerator {
         .info-value { font-size: 18px; color: #2c3e50; margin-top: 6px; font-weight: 500; word-break: break-word; }
         .heatmap-container { overflow-x: auto; padding-bottom: 10px; }
         .heatmap { display: grid; grid-template-columns: repeat(${cols}, 1fr); gap: 3px; min-width: ${cols * 45}px; }
-        .cell { aspect-ratio: 1; min-width: 40px; display: flex; align-items: center; justify-content: center; font-size: 12px; font-weight: 600; color: white; border-radius: 4px; cursor: pointer; transition: transform 0.2s, box-shadow 0.2s; position: relative; text-shadow: 1px 1px 2px rgba(0,0,0,0.4); }
+        .cell { aspect-ratio: 1.2; min-width: 40px; display: flex; align-items: center; justify-content: center; font-size: 12px; font-weight: 600; color: white; border-radius: 4px; cursor: pointer; transition: transform 0.2s, box-shadow 0.2s; position: relative; text-shadow: 1px 1px 2px rgba(0,0,0,0.4); }
         .cell:hover { transform: scale(1.15); z-index: 10; box-shadow: 0 6px 12px rgba(0,0,0,0.3); }
         .cell.empty { background-color: #e9ecef; }
         .tooltip { visibility: hidden; position: absolute; background: rgba(0,0,0,0.85); color: white; padding: 10px; border-radius: 6px; font-size: 12px; pointer-events: none; z-index: 1000; white-space: nowrap; transform: translate(-50%, -110%); top: 0; left: 50%; opacity: 0; transition: opacity 0.2s, visibility 0.2s; }
@@ -372,7 +389,7 @@ class PortfolioHeatmapGenerator {
         <div class="stats-section">
             <div class="stats-grid">
                 ${Object.entries(this.metricProperties).map(([key, prop]) => { const value = overallStats[key]; return `<div class="stat-card"><div class="stat-value">${(value !== null && isFinite(value)) ? prop.format(value) : 'N/A'}</div><div class="stat-label">${prop.displayName}</div></div>`; }).join('')}
-                <div class="stat-card"><div class="stat-value">${overallStats.numTrades}</div><div class="stat-label">總交易數</div></div>
+                <div class="stat-card"><div class="stat-value">${overallStats.numTrades}</div><div class="stat-label">Total Trades</div></div>
             </div>
         </div>
         
@@ -477,7 +494,7 @@ class PortfolioHeatmapGenerator {
             console.log('🎯 組合策略表現熱力圖生成器');
             console.log('====================================\n');
             const periodType = await question('📅 請選擇週期類型 (day/week/month) [預設: day]: ') || 'day';
-            const periodLengthInput = await question('📊 請輸入週期長度 (數字) [預社: 1]: ') || '1';
+            const periodLengthInput = await question('📊 請輸入週期長度 (數字) [預設: 1]: ') || '1';
             const periodLength = parseInt(periodLengthInput) || 1;
             console.log('\n📈 請選擇熱力圖主顯示指標:');
             const metricKeys = Object.keys(this.metricProperties);
